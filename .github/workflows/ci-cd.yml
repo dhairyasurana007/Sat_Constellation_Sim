@@ -114,6 +114,13 @@ jobs:
              sudo mkdir -p /var/www/sat_constellation_sim/backend && \
              sudo chown -R ubuntu:ubuntu /var/www/sat_constellation_sim"
 
+      - name: Install system dependencies
+        run: |
+          ssh -i ~/.ssh/lightsail_key \
+            ${{ secrets.LIGHTSAIL_USER }}@${{ secrets.LIGHTSAIL_HOST }} \
+            "sudo apt-get update && \
+             sudo apt-get install -y python3-venv python3-pip nginx"
+
       - name: Deploy to server
         run: |
           # Sync frontend build
