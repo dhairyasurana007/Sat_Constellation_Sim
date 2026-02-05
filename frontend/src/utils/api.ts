@@ -131,12 +131,12 @@ export function createPositionStream(
     try {
       const data = JSON.parse(event.data);
       onData(data);
-    } catch (e) {
-      console.error('Failed to parse SSE data:', e);
+    } catch {
+      console.error('Failed to parse SSE data:');
     }
   };
   
-  eventSource.onerror = (e) => {
+  eventSource.onerror = (event) => {
     onError?.(new Error('SSE connection error'));
     eventSource.close();
   };

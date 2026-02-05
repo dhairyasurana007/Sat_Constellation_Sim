@@ -116,7 +116,7 @@ function ScenarioComparisonComponent({
 
       {/* Scenario Selection */}
       <div className="scenario-selector">
-        {scenarios.map((scenario, index) => (
+        {scenarios.map((scenario) => (
           <button
             key={scenario.id}
             className={`scenario-chip ${

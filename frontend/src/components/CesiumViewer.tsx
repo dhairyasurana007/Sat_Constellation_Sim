@@ -74,14 +74,14 @@ function CesiumViewerComponent({
       // Use lower resolution terrain for better performance
       terrainProvider: undefined,
       
-      // Optimize imagery
-      imageryProvider: new Cesium.IonImageryProvider({ assetId: 3845 }), // Blue Marble
     });
 
     // Configure scene for performance
     viewer.scene.globe.enableLighting = false;
     viewer.scene.fog.enabled = false;
-    viewer.scene.skyAtmosphere.show = false;
+    if (viewer.scene.skyAtmosphere) {
+      viewer.scene.skyAtmosphere.show = false;
+    }
     
     // Use faster anti-aliasing
     viewer.scene.postProcessStages.fxaa.enabled = true;
