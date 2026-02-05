@@ -112,7 +112,7 @@ jobs:
           rsync -avz --delete \
             -e "ssh -i ~/.ssh/lightsail_key" \
             frontend/dist/ \
-            ${{ secrets.LIGHTSAIL_USER }}@${{ secrets.LIGHTSAIL_HOST }}:/var/www/sedaro/frontend/dist/
+            ${{ secrets.LIGHTSAIL_USER }}@${{ secrets.LIGHTSAIL_HOST }}:/var/www/sat_constellation_sim/frontend/dist/
 
           # Sync backend code
           rsync -avz --delete \
@@ -121,12 +121,12 @@ jobs:
             --exclude '.pytest_cache' \
             -e "ssh -i ~/.ssh/lightsail_key" \
             backend/ \
-            ${{ secrets.LIGHTSAIL_USER }}@${{ secrets.LIGHTSAIL_HOST }}:/var/www/sedaro/backend/
+            ${{ secrets.LIGHTSAIL_USER }}@${{ secrets.LIGHTSAIL_HOST }}:/var/www/sat_constellation_sim/backend/
 
           # Restart backend service
           ssh -i ~/.ssh/lightsail_key \
             ${{ secrets.LIGHTSAIL_USER }}@${{ secrets.LIGHTSAIL_HOST }} \
-            "cd /var/www/sedaro/backend && \
+            "cd /var/www/sat_constellation_sim/backend && \
              source venv/bin/activate && \
              pip install -r requirements.txt && \
              sudo systemctl restart sedaro-api"
