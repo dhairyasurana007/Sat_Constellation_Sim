@@ -106,6 +106,14 @@ jobs:
           chmod 600 ~/.ssh/lightsail_key
           ssh-keyscan -H ${{ secrets.LIGHTSAIL_HOST }} >> ~/.ssh/known_hosts
 
+      - name: Ensure directories exist
+        run: |
+          ssh -i ~/.ssh/lightsail_key \
+            ${{ secrets.LIGHTSAIL_USER }}@${{ secrets.LIGHTSAIL_HOST }} \
+            "sudo mkdir -p /var/www/sat_constellation_sim/frontend/dist && \
+             sudo mkdir -p /var/www/sat_constellation_sim/backend && \
+             sudo chown -R ubuntu:ubuntu /var/www/sat_constellation_sim"
+
       - name: Deploy to server
         run: |
           # Sync frontend build
@@ -135,7 +143,7 @@ jobs:
         run: |
           sleep 5  # Wait for service to start
           curl -f http://${{ secrets.LIGHTSAIL_HOST }}/api/ || exit 1
-          echo "✓ Deployment verified successfully"
+          echo "Deployment verified successfully"
 
       - name: Deployment summary
         run: |
