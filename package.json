@@ -1,0 +1,19 @@
+{
+  "name": "package.json",
+  "version": "1.0.0",
+  "description": "Package for satellite constellation viewer POC",
+  "bugs": {
+    "url": "https://github.com/dhairyasurana007/Sat_Constellation_Sim/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/dhairyasurana007/Sat_Constellation_Sim.git"
+  },
+  "license": "ISC",
+  "author": "Dhairya Surana",
+  "type": "commonjs",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  }
+}
