@@ -136,7 +136,7 @@ export function createPositionStream(
     }
   };
   
-  eventSource.onerror = (event) => {
+  eventSource.onerror = () => {
     onError?.(new Error('SSE connection error'));
     eventSource.close();
   };
