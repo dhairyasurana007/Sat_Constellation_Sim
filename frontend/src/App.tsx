@@ -87,7 +87,7 @@ export default function App() {
       {/* Header */}
       <header className="app-header">
         <div className="header-left">
-          <h1>Sedaro Constellation Visualizer</h1>
+          <h1>Satellite Constellation Visualizer</h1>
           <span className="subtitle">High-Performance Satellite Simulation PoC</span>
         </div>
         <div className="header-right">
