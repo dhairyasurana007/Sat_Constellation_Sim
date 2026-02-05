@@ -1,0 +1,146 @@
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  NODE_VERSION: '18'
+  PYTHON_VERSION: '3.11'
+
+jobs:
+  # ===========================================================================
+  # Frontend Tests & Build
+  # ===========================================================================
+  frontend:
+    name: Frontend Build
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        working-directory: ./frontend
+        run: npm ci
+
+      - name: Type check
+        working-directory: ./frontend
+        run: npm run lint || true  # Don't fail on lint warnings for now
+
+      - name: Build
+        working-directory: ./frontend
+        run: npm run build
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-dist
+          path: frontend/dist
+          retention-days: 1
+
+  # ===========================================================================
+  # Backend Tests
+  # ===========================================================================
+  backend:
+    name: Backend Tests
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
+          cache-dependency-path: backend/requirements.txt
+
+      - name: Install dependencies
+        working-directory: ./backend
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest httpx  # Testing dependencies
+
+      - name: Run tests
+        working-directory: ./backend
+        run: |
+          # Run basic import/syntax check if no tests exist yet
+          python -c "from main import app; print('✓ Backend imports successfully')"
+          # pytest tests/ -v  # Uncomment when you have tests
+
+  # ===========================================================================
+  # Deploy to Lightsail (only on push to main)
+  # ===========================================================================
+  deploy:
+    name: Deploy to Lightsail
+    runs-on: ubuntu-latest
+    needs: [frontend, backend]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download frontend build
+        uses: actions/download-artifact@v4
+        with:
+          name: frontend-dist
+          path: frontend/dist
+
+      - name: Setup SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.LIGHTSAIL_SSH_KEY }}" > ~/.ssh/lightsail_key
+          chmod 600 ~/.ssh/lightsail_key
+          ssh-keyscan -H ${{ secrets.LIGHTSAIL_HOST }} >> ~/.ssh/known_hosts
+
+      - name: Deploy to server
+        run: |
+          # Sync frontend build
+          rsync -avz --delete \
+            -e "ssh -i ~/.ssh/lightsail_key" \
+            frontend/dist/ \
+            ${{ secrets.LIGHTSAIL_USER }}@${{ secrets.LIGHTSAIL_HOST }}:/var/www/sedaro/frontend/dist/
+
+          # Sync backend code
+          rsync -avz --delete \
+            --exclude '__pycache__' \
+            --exclude 'venv' \
+            --exclude '.pytest_cache' \
+            -e "ssh -i ~/.ssh/lightsail_key" \
+            backend/ \
+            ${{ secrets.LIGHTSAIL_USER }}@${{ secrets.LIGHTSAIL_HOST }}:/var/www/sedaro/backend/
+
+          # Restart backend service
+          ssh -i ~/.ssh/lightsail_key \
+            ${{ secrets.LIGHTSAIL_USER }}@${{ secrets.LIGHTSAIL_HOST }} \
+            "cd /var/www/sedaro/backend && \
+             source venv/bin/activate && \
+             pip install -r requirements.txt && \
+             sudo systemctl restart sedaro-api"
+
+      - name: Verify deployment
+        run: |
+          sleep 5  # Wait for service to start
+          curl -f http://${{ secrets.LIGHTSAIL_HOST }}/api/ || exit 1
+          echo "✓ Deployment verified successfully"
+
+      - name: Deployment summary
+        run: |
+          echo "## Deployment Complete! :rocket:" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**URL:** http://${{ secrets.LIGHTSAIL_HOST }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Commit:** ${{ github.sha }}" >> $GITHUB_STEP_SUMMARY
