@@ -138,14 +138,22 @@ jobs:
             backend/ \
             ${{ secrets.LIGHTSAIL_USER }}@${{ secrets.LIGHTSAIL_HOST }}:/var/www/sat_constellation_sim/backend/
 
-          # Create venv if it doesn't exist, install deps, restart service
+      - name: Setup Python environment
+        run: |
           ssh -i ~/.ssh/lightsail_key \
-            ${{ secrets.LIGHTSAIL_USER }}@${{ secrets.LIGHTSAIL_HOST }} \
-            "cd /var/www/sat_constellation_sim/backend && \
-             [ ! -d venv ] && python3 -m venv venv || true && \
-             source venv/bin/activate && \
-             pip install -r requirements.txt && \
-             sudo systemctl restart sedaro-api"
+            ${{ secrets.LIGHTSAIL_USER }}@${{ secrets.LIGHTSAIL_HOST }} << 'EOF'
+          cd /var/www/sat_constellation_sim/backend
+          if [ ! -d "venv" ]; then
+            echo "Creating virtual environment..."
+            python3 -m venv venv
+          fi
+          echo "Activating venv..."
+          source venv/bin/activate
+          echo "Installing requirements..."
+          pip install -r requirements.txt
+          echo "Restarting service..."
+          sudo systemctl restart sedaro-api || echo "Service not configured yet"
+          EOF
 
       - name: Verify deployment
         run: |
