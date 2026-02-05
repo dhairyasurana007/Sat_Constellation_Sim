@@ -155,6 +155,87 @@ jobs:
           sudo systemctl restart sedaro-api || echo "Service not configured yet"
           EOF
 
+      - name: Configure Nginx
+        run: |
+          ssh -i ~/.ssh/lightsail_key \
+            ${{ secrets.LIGHTSAIL_USER }}@${{ secrets.LIGHTSAIL_HOST }} << 'EOF'
+          
+          # Create Nginx config
+          sudo tee /etc/nginx/sites-available/sat_constellation_sim > /dev/null << 'NGINX'
+          server {
+              listen 80;
+              server_name _;
+
+              gzip on;
+              gzip_types text/plain text/css application/json application/javascript text/xml application/xml;
+
+              location / {
+                  root /var/www/sat_constellation_sim/frontend/dist;
+                  index index.html;
+                  try_files $uri $uri/ /index.html;
+              }
+
+              location /api/ {
+                  proxy_pass http://127.0.0.1:8000;
+                  proxy_http_version 1.1;
+                  proxy_set_header Host $host;
+                  proxy_set_header X-Real-IP $remote_addr;
+                  proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                  proxy_set_header X-Forwarded-Proto $scheme;
+              }
+
+              location /ws/ {
+                  proxy_pass http://127.0.0.1:8000;
+                  proxy_http_version 1.1;
+                  proxy_set_header Upgrade $http_upgrade;
+                  proxy_set_header Connection "upgrade";
+                  proxy_set_header Host $host;
+                  proxy_read_timeout 86400;
+              }
+          }
+          NGINX
+
+          # Enable site and remove default
+          sudo ln -sf /etc/nginx/sites-available/sat_constellation_sim /etc/nginx/sites-enabled/
+          sudo rm -f /etc/nginx/sites-enabled/default
+          
+          # Test and restart
+          sudo nginx -t
+          sudo systemctl restart nginx
+          echo "✓ Nginx configured"
+          EOF
+
+      - name: Setup systemd service
+        run: |
+          ssh -i ~/.ssh/lightsail_key \
+            ${{ secrets.LIGHTSAIL_USER }}@${{ secrets.LIGHTSAIL_HOST }} << 'EOF'
+          
+          # Create systemd service
+          sudo tee /etc/systemd/system/sedaro-api.service > /dev/null << 'SERVICE'
+          [Unit]
+          Description=Satellite Constellation Simulator API
+          After=network.target
+
+          [Service]
+          User=ubuntu
+          Group=ubuntu
+          WorkingDirectory=/var/www/sat_constellation_sim/backend
+          Environment="PATH=/var/www/sat_constellation_sim/backend/venv/bin"
+          ExecStart=/var/www/sat_constellation_sim/backend/venv/bin/uvicorn main:app --host 127.0.0.1 --port 8000
+          Restart=always
+          RestartSec=5
+
+          [Install]
+          WantedBy=multi-user.target
+          SERVICE
+
+          # Enable and start service
+          sudo systemctl daemon-reload
+          sudo systemctl enable sedaro-api
+          sudo systemctl restart sedaro-api
+          echo "Systemd service configured"
+          EOF
+
       - name: Verify deployment
         run: |
           sleep 5  # Wait for service to start
