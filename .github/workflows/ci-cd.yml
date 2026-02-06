@@ -143,14 +143,8 @@ jobs:
           ssh -i ~/.ssh/lightsail_key \
             ${{ secrets.LIGHTSAIL_USER }}@${{ secrets.LIGHTSAIL_HOST }} << 'EOF'
           cd /var/www/sat_constellation_sim/backend
-          if [ ! -d "venv" ]; then
-            echo "Creating virtual environment..."
-            python3 -m venv venv
-          fi
-          echo "Activating venv..."
-          source venv/bin/activate
-          echo "Installing requirements..."
-          pip install -r requirements.txt
+          echo "Installing requirements globally..."
+          pip install -r requirements.txt --break-system-packages
           EOF
 
       - name: Configure Nginx
@@ -218,8 +212,7 @@ jobs:
           User=ubuntu
           Group=ubuntu
           WorkingDirectory=/var/www/sat_constellation_sim/backend
-          Environment="PATH=/var/www/sat_constellation_sim/backend/venv/bin"
-          ExecStart=/var/www/sat_constellation_sim/backend/venv/bin/uvicorn main:app --host 127.0.0.1 --port 8000
+          ExecStart=/usr/bin/python3 -m uvicorn main:app --host 127.0.0.1 --port 8000
           Restart=always
           RestartSec=5
 
