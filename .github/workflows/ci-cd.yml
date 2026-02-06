@@ -230,7 +230,7 @@ jobs:
       - name: Verify deployment
         run: |
           sleep 5  # Wait for service to start
-          curl -f http://${{ secrets.LIGHTSAIL_HOST }}/api/ || exit 1
+          curl -f http://${{ secrets.LIGHTSAIL_HOST }}/api/scenarios || exit 1
           echo "Deployment verified successfully"
 
       - name: Deployment summary
