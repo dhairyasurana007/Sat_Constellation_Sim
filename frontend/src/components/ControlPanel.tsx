@@ -143,14 +143,6 @@ function ControlPanelComponent({
           />
           Color by Orbit Type
         </label>
-        <label className="checkbox-label">
-          <input
-            type="checkbox"
-            checked={settings.showOrbits}
-            onChange={(e) => onSettingsChange({ showOrbits: e.target.checked })}
-          />
-          Show Orbit Paths
-        </label>
 
         <div className="slider-control">
           <label>Satellite Scale: {settings.satelliteScale.toFixed(1)}x</label>
