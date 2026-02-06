@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect } from 'react';
+import { useState, useCallback, useEffect, useRef } from 'react';
 import { CesiumViewer } from './components/CesiumViewer';
 import { ControlPanel } from './components/ControlPanel';
 import { ScenarioComparison } from './components/ScenarioComparison';
@@ -31,6 +31,10 @@ export default function App() {
   const [selectedScenario, setSelectedScenario] = useState<string | null>(null);
   const { positions, loading: positionsLoading, apiLatency, refetch } = usePositions(selectedScenario);
 
+  // Track if we've done the initial load
+  const hasInitialLoad = useRef(false);
+  const [initialLoading, setInitialLoading] = useState(false);
+
   // Playback state
   const playback = usePlayback(86400); // 24 hours
   const throttledTime = useThrottle(playback.state.currentTime, 100); // Update positions at most every 100ms
@@ -46,6 +50,27 @@ export default function App() {
 
   // Comparison mode state
   const [comparisonScenarios, setComparisonScenarios] = useState<string[]>([]);
+
+  // Handle initial load state
+  useEffect(() => {
+    if (selectedScenario && !hasInitialLoad.current) {
+      setInitialLoading(true);
+      hasInitialLoad.current = true;
+    }
+  }, [selectedScenario]);
+
+  // Clear initial loading once we have positions
+  useEffect(() => {
+    if (positions.length > 0 && initialLoading) {
+      setInitialLoading(false);
+    }
+  }, [positions.length, initialLoading]);
+
+  // Reset initial load tracking when scenario changes
+  useEffect(() => {
+    hasInitialLoad.current = false;
+    setInitialLoading(false);
+  }, [selectedScenario]);
 
   // Update positions when playback time changes
   useEffect(() => {
@@ -67,6 +92,8 @@ export default function App() {
   const handleScenarioSelect = useCallback((id: string) => {
     setSelectedScenario(id);
     setSelectedSatellite(null);
+    hasInitialLoad.current = false;
+    setInitialLoading(true);
     playback.reset();
   }, [playback]);
 
@@ -80,7 +107,8 @@ export default function App() {
     );
   }, []);
 
-  const isLoading = scenariosLoading || positionsLoading;
+  // Only show loading overlay during initial scenario load
+  const isLoading = scenariosLoading || initialLoading;
 
   return (
     <div className="app">
@@ -88,7 +116,7 @@ export default function App() {
       <header className="app-header">
         <div className="header-left">
           <h1>Satellite Constellation Visualizer</h1>
-          <span className="subtitle">High-Performance Satellite Simulation PoC</span>
+          <span className="subtitle">Real-time tracking with CelesTrak data</span>
         </div>
         <div className="header-right">
           <nav className="view-toggle">
@@ -198,9 +226,9 @@ export default function App() {
 
       {/* Footer */}
       <footer className="app-footer">
-        <span>PoC for Sedaro Lead Software Engineer Position</span>
+        <span>Real-time satellite tracking</span>
         <span className="separator">|</span>
-        <span>Tech: React + TypeScript + Cesium + Python FastAPI</span>
+        <span>Data: CelesTrak • Propagator: SGP4</span>
         <span className="separator">|</span>
         <span>
           {positions.length} satellites @ {metrics.fps.toFixed(0)} FPS
