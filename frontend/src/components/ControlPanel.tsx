@@ -67,7 +67,7 @@ function ControlPanelComponent({
           <option value="">Select a scenario...</option>
           {scenarios.map((scenario) => (
             <option key={scenario.id} value={scenario.id}>
-              {scenario.name} ({scenario.satellite_count} sats)
+              {scenario.name}
             </option>
           ))}
         </select>
