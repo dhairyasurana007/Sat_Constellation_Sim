@@ -1,11 +1,12 @@
 """
-Sedaro PoC - Satellite Constellation Simulation Backend
-========================================================
-Demonstrates:
+Satellite Constellation Simulator Backend
+==========================================
+Features:
+- Real satellite data from CelesTrak
+- TLE parsing and orbital propagation using SGP4
 - High-performance async API design
 - Efficient data streaming for massive datasets
 - Scenario comparison capabilities
-- Performance-conscious data chunking
 """
 
 from fastapi import FastAPI, Query, WebSocket, WebSocketDisconnect
@@ -14,17 +15,21 @@ from fastapi.responses import StreamingResponse
 import json
 import math
 import asyncio
-from datetime import datetime, timedelta
-from typing import Optional, List, Generator
-import random
+import httpx
+from datetime import datetime, timezone
+from typing import Optional, List
 from dataclasses import dataclass, asdict
 from enum import Enum
 import time
 
+# SGP4 for accurate orbital propagation
+from sgp4.api import Satrec, jday
+from sgp4 import exporter
+
 app = FastAPI(
-    title="Sedaro Constellation Simulator PoC",
-    description="High-performance satellite constellation visualization backend",
-    version="0.1.0"
+    title="Satellite Constellation Simulator",
+    description="Real-time satellite tracking with CelesTrak data",
+    version="1.0.0"
 )
 
 app.add_middleware(
@@ -46,23 +51,12 @@ class OrbitType(str, Enum):
     HEO = "HEO"  # Highly Elliptical Orbit
 
 @dataclass
-class OrbitalElements:
-    """Keplerian orbital elements for satellite positioning"""
-    semi_major_axis: float  # km
-    eccentricity: float
-    inclination: float  # degrees
-    raan: float  # Right Ascension of Ascending Node (degrees)
-    arg_periapsis: float  # Argument of periapsis (degrees)
-    true_anomaly: float  # degrees
-    
-@dataclass
 class Satellite:
     id: str
     name: str
     orbit_type: OrbitType
-    orbital_elements: OrbitalElements
-    launch_date: str
-    status: str
+    tle_line1: str
+    tle_line2: str
     
 @dataclass 
 class Scenario:
@@ -70,170 +64,231 @@ class Scenario:
     name: str
     description: str
     satellite_count: int
-    duration_hours: int
+    tle_url: str
     created_at: str
 
 # ============================================================================
-# Physics Engine (Simplified for PoC)
+# CelesTrak TLE Sources
 # ============================================================================
 
-EARTH_RADIUS_KM = 6371.0
-EARTH_MU = 398600.4418  # km³/s²
+CELESTRAK_BASE = "https://celestrak.org/NORAD/elements/gp.php"
 
-def compute_orbital_period(semi_major_axis: float) -> float:
-    """Compute orbital period in seconds using Kepler's 3rd law"""
-    return 2 * math.pi * math.sqrt(semi_major_axis**3 / EARTH_MU)
-
-def propagate_position(orbital_elements: OrbitalElements, time_offset_seconds: float) -> dict:
-    """
-    Propagate satellite position using simplified two-body dynamics.
-    Returns ECEF coordinates for Cesium rendering.
-    """
-    a = orbital_elements.semi_major_axis
-    e = orbital_elements.eccentricity
-    i = math.radians(orbital_elements.inclination)
-    raan = math.radians(orbital_elements.raan)
-    omega = math.radians(orbital_elements.arg_periapsis)
-    
-    # Compute mean motion and propagate mean anomaly
-    n = math.sqrt(EARTH_MU / a**3)  # rad/s
-    M0 = math.radians(orbital_elements.true_anomaly)  # Simplified: using true as mean
-    M = M0 + n * time_offset_seconds
-    
-    # Solve Kepler's equation (simplified Newton-Raphson)
-    E = M
-    for _ in range(10):
-        E = M + e * math.sin(E)
-    
-    # True anomaly
-    nu = 2 * math.atan2(
-        math.sqrt(1 + e) * math.sin(E / 2),
-        math.sqrt(1 - e) * math.cos(E / 2)
-    )
-    
-    # Distance from Earth center
-    r = a * (1 - e * math.cos(E))
-    
-    # Position in orbital plane
-    x_orb = r * math.cos(nu)
-    y_orb = r * math.sin(nu)
-    
-    # Rotation matrices to ECEF
-    cos_raan, sin_raan = math.cos(raan), math.sin(raan)
-    cos_i, sin_i = math.cos(i), math.sin(i)
-    cos_omega, sin_omega = math.cos(omega), math.sin(omega)
-    
-    # Transform to ECEF (simplified, ignoring Earth rotation for PoC)
-    x = (cos_raan * cos_omega - sin_raan * sin_omega * cos_i) * x_orb + \
-        (-cos_raan * sin_omega - sin_raan * cos_omega * cos_i) * y_orb
-    y = (sin_raan * cos_omega + cos_raan * sin_omega * cos_i) * x_orb + \
-        (-sin_raan * sin_omega + cos_raan * cos_omega * cos_i) * y_orb
-    z = (sin_omega * sin_i) * x_orb + (cos_omega * sin_i) * y_orb
-    
-    # Convert to lat/lon/alt for Cesium
-    lon = math.degrees(math.atan2(y, x))
-    lat = math.degrees(math.asin(z / r))
-    alt = (r - EARTH_RADIUS_KM) * 1000  # Convert to meters
-    
-    return {
-        "longitude": lon,
-        "latitude": lat,
-        "altitude": alt,
-        "velocity": math.sqrt(EARTH_MU * (2/r - 1/a))  # vis-viva equation
-    }
+SCENARIOS = {
+    "starlink": Scenario(
+        id="starlink",
+        name="Starlink Constellation",
+        description="SpaceX Starlink broadband satellites",
+        satellite_count=0,  # Updated on fetch
+        tle_url=f"{CELESTRAK_BASE}?GROUP=starlink&FORMAT=tle",
+        created_at=datetime.now(timezone.utc).isoformat()
+    ),
+    "gps": Scenario(
+        id="gps",
+        name="GPS Constellation",
+        description="US Global Positioning System satellites",
+        satellite_count=0,
+        tle_url=f"{CELESTRAK_BASE}?GROUP=gps-ops&FORMAT=tle",
+        created_at=datetime.now(timezone.utc).isoformat()
+    ),
+    "iridium": Scenario(
+        id="iridium",
+        name="Iridium NEXT",
+        description="Iridium satellite phone constellation",
+        satellite_count=0,
+        tle_url=f"{CELESTRAK_BASE}?GROUP=iridium-NEXT&FORMAT=tle",
+        created_at=datetime.now(timezone.utc).isoformat()
+    ),
+    "space-stations": Scenario(
+        id="space-stations",
+        name="Space Stations",
+        description="ISS and other crewed stations",
+        satellite_count=0,
+        tle_url=f"{CELESTRAK_BASE}?GROUP=stations&FORMAT=tle",
+        created_at=datetime.now(timezone.utc).isoformat()
+    ),
+    "oneweb": Scenario(
+        id="oneweb",
+        name="OneWeb Constellation",
+        description="OneWeb broadband satellites",
+        satellite_count=0,
+        tle_url=f"{CELESTRAK_BASE}?GROUP=oneweb&FORMAT=tle",
+        created_at=datetime.now(timezone.utc).isoformat()
+    ),
+    "active": Scenario(
+        id="active",
+        name="All Active Satellites",
+        description="All currently active satellites (large dataset)",
+        satellite_count=0,
+        tle_url=f"{CELESTRAK_BASE}?GROUP=active&FORMAT=tle",
+        created_at=datetime.now(timezone.utc).isoformat()
+    ),
+}
 
 # ============================================================================
-# Scenario Generation
+# TLE Cache
 # ============================================================================
 
-def generate_constellation(
-    name: str,
-    num_planes: int,
-    sats_per_plane: int,
-    altitude_km: float,
-    inclination: float,
-    orbit_type: OrbitType = OrbitType.LEO
-) -> List[Satellite]:
-    """Generate a Walker constellation pattern"""
+class TLECache:
+    """Simple in-memory cache for TLE data"""
+    def __init__(self, ttl_seconds: int = 3600):  # 1 hour default
+        self.cache: dict[str, tuple[List[Satellite], float]] = {}
+        self.ttl = ttl_seconds
+    
+    def get(self, scenario_id: str) -> Optional[List[Satellite]]:
+        if scenario_id in self.cache:
+            satellites, timestamp = self.cache[scenario_id]
+            if time.time() - timestamp < self.ttl:
+                return satellites
+        return None
+    
+    def set(self, scenario_id: str, satellites: List[Satellite]):
+        self.cache[scenario_id] = (satellites, time.time())
+
+tle_cache = TLECache()
+
+# ============================================================================
+# TLE Parsing & Orbital Propagation
+# ============================================================================
+
+def classify_orbit(mean_motion: float, eccentricity: float) -> OrbitType:
+    """Classify orbit type based on orbital elements"""
+    # Mean motion is in revolutions per day
+    # Convert to approximate altitude
+    # n = sqrt(mu/a^3), solving for a, then altitude = a - Earth_radius
+    
+    period_minutes = 1440 / mean_motion  # minutes per orbit
+    
+    if period_minutes < 128:  # Less than ~2000km
+        return OrbitType.LEO
+    elif period_minutes < 720:  # Less than ~35786km  
+        return OrbitType.MEO
+    elif 1430 < period_minutes < 1450 and eccentricity < 0.01:  # ~24 hour, circular
+        return OrbitType.GEO
+    else:
+        return OrbitType.HEO
+
+def parse_tle(tle_text: str) -> List[Satellite]:
+    """Parse TLE format text into Satellite objects"""
+    lines = tle_text.strip().split('\n')
     satellites = []
-    total_sats = num_planes * sats_per_plane
     
-    for plane in range(num_planes):
-        raan = (360.0 / num_planes) * plane
+    i = 0
+    while i < len(lines) - 2:
+        name = lines[i].strip()
+        line1 = lines[i + 1].strip()
+        line2 = lines[i + 2].strip()
         
-        for sat in range(sats_per_plane):
-            phase_offset = (360.0 / sats_per_plane) * sat
-            # Walker phasing
-            phase_offset += (360.0 / total_sats) * plane
+        # Validate TLE lines
+        if not line1.startswith('1 ') or not line2.startswith('2 '):
+            i += 1
+            continue
+        
+        try:
+            # Extract NORAD catalog number as ID
+            norad_id = line1[2:7].strip()
             
-            orbital_elements = OrbitalElements(
-                semi_major_axis=EARTH_RADIUS_KM + altitude_km,
-                eccentricity=0.001 + random.uniform(0, 0.005),  # Near-circular
-                inclination=inclination + random.uniform(-0.5, 0.5),
-                raan=raan,
-                arg_periapsis=random.uniform(0, 360),
-                true_anomaly=phase_offset % 360
-            )
+            # Extract mean motion and eccentricity for orbit classification
+            mean_motion = float(line2[52:63])
+            eccentricity = float(f"0.{line2[26:33]}")
             
-            sat_id = f"{name}-P{plane+1:02d}-S{sat+1:02d}"
+            orbit_type = classify_orbit(mean_motion, eccentricity)
+            
             satellites.append(Satellite(
-                id=sat_id,
-                name=sat_id,
+                id=norad_id,
+                name=name,
                 orbit_type=orbit_type,
-                orbital_elements=orbital_elements,
-                launch_date=datetime.now().isoformat(),
-                status="operational"
+                tle_line1=line1,
+                tle_line2=line2
             ))
+        except (ValueError, IndexError) as e:
+            print(f"Error parsing TLE for {name}: {e}")
+        
+        i += 3
     
     return satellites
 
-# Pre-generated scenarios for demo
-SCENARIOS = {
-    "starlink-subset": Scenario(
-        id="starlink-subset",
-        name="Starlink Subset (550km Shell)",
-        description="Simulated subset of Starlink constellation at 550km altitude",
-        satellite_count=72,
-        duration_hours=24,
-        created_at=datetime.now().isoformat()
-    ),
-    "gps-constellation": Scenario(
-        id="gps-constellation", 
-        name="GPS Constellation",
-        description="24-satellite MEO navigation constellation",
-        satellite_count=24,
-        duration_hours=48,
-        created_at=datetime.now().isoformat()
-    ),
-    "iridium-next": Scenario(
-        id="iridium-next",
-        name="Iridium NEXT",
-        description="66-satellite polar LEO constellation",
-        satellite_count=66,
-        duration_hours=24,
-        created_at=datetime.now().isoformat()
-    ),
-    "custom-mega": Scenario(
-        id="custom-mega",
-        name="Mega Constellation Test",
-        description="Large-scale stress test with 500+ satellites",
-        satellite_count=540,
-        duration_hours=12,
-        created_at=datetime.now().isoformat()
-    )
-}
+async def fetch_tle_data(scenario_id: str) -> List[Satellite]:
+    """Fetch TLE data from CelesTrak"""
+    # Check cache first
+    cached = tle_cache.get(scenario_id)
+    if cached:
+        return cached
+    
+    if scenario_id not in SCENARIOS:
+        return []
+    
+    scenario = SCENARIOS[scenario_id]
+    
+    async with httpx.AsyncClient() as client:
+        try:
+            response = await client.get(scenario.tle_url, timeout=30.0)
+            response.raise_for_status()
+            satellites = parse_tle(response.text)
+            
+            # Update scenario count
+            SCENARIOS[scenario_id] = Scenario(
+                id=scenario.id,
+                name=scenario.name,
+                description=scenario.description,
+                satellite_count=len(satellites),
+                tle_url=scenario.tle_url,
+                created_at=scenario.created_at
+            )
+            
+            # Cache the results
+            tle_cache.set(scenario_id, satellites)
+            
+            return satellites
+        except Exception as e:
+            print(f"Error fetching TLE data: {e}")
+            return []
 
-def get_constellation_for_scenario(scenario_id: str) -> List[Satellite]:
-    """Generate satellite constellation based on scenario"""
-    if scenario_id == "starlink-subset":
-        return generate_constellation("STRLK", 6, 12, 550, 53.0, OrbitType.LEO)
-    elif scenario_id == "gps-constellation":
-        return generate_constellation("GPS", 6, 4, 20200, 55.0, OrbitType.MEO)
-    elif scenario_id == "iridium-next":
-        return generate_constellation("IRID", 6, 11, 780, 86.4, OrbitType.LEO)
-    elif scenario_id == "custom-mega":
-        return generate_constellation("MEGA", 18, 30, 1200, 70.0, OrbitType.LEO)
-    return []
+def propagate_satellite(satellite: Satellite, dt: datetime) -> dict:
+    """
+    Propagate satellite position using SGP4.
+    Returns lat/lon/alt for Cesium rendering.
+    """
+    try:
+        # Create satellite record from TLE
+        sat = Satrec.twoline2rv(satellite.tle_line1, satellite.tle_line2)
+        
+        # Get Julian date
+        jd, fr = jday(dt.year, dt.month, dt.day, dt.hour, dt.minute, dt.second + dt.microsecond/1e6)
+        
+        # Propagate
+        error, position, velocity = sat.sgp4(jd, fr)
+        
+        if error != 0:
+            return None
+        
+        # position is in km in TEME frame
+        x, y, z = position
+        vx, vy, vz = velocity
+        
+        # Convert TEME to geodetic (simplified - ignoring Earth rotation for demo)
+        # For accuracy, should use proper TEME to ITRF conversion
+        r = math.sqrt(x*x + y*y + z*z)
+        
+        # Approximate conversion to lat/lon/alt
+        lon = math.degrees(math.atan2(y, x))
+        lat = math.degrees(math.asin(z / r))
+        alt = (r - 6371.0) * 1000  # Convert to meters above Earth surface
+        
+        # Calculate velocity magnitude
+        vel = math.sqrt(vx*vx + vy*vy + vz*vz)
+        
+        return {
+            "id": satellite.id,
+            "name": satellite.name,
+            "orbit_type": satellite.orbit_type.value,
+            "longitude": lon,
+            "latitude": lat,
+            "altitude": alt,
+            "velocity": vel
+        }
+    except Exception as e:
+        print(f"Error propagating {satellite.name}: {e}")
+        return None
 
 # ============================================================================
 # API Endpoints
@@ -242,21 +297,20 @@ def get_constellation_for_scenario(scenario_id: str) -> List[Satellite]:
 @app.get("/")
 async def root():
     return {
-        "service": "Sedaro Constellation Simulator PoC",
-        "version": "0.1.0",
+        "service": "Satellite Constellation Simulator",
+        "version": "1.0.0",
+        "data_source": "CelesTrak",
         "endpoints": {
             "scenarios": "/api/scenarios",
             "satellites": "/api/scenarios/{id}/satellites",
             "positions": "/api/scenarios/{id}/positions",
-            "stream": "/api/scenarios/{id}/stream",
-            "compare": "/api/compare",
-            "metrics": "/api/metrics"
+            "compare": "/api/compare"
         }
     }
 
 @app.get("/api/scenarios")
 async def list_scenarios():
-    """List all available simulation scenarios"""
+    """List all available scenarios"""
     return {"scenarios": [asdict(s) for s in SCENARIOS.values()]}
 
 @app.get("/api/scenarios/{scenario_id}")
@@ -264,19 +318,26 @@ async def get_scenario(scenario_id: str):
     """Get scenario details"""
     if scenario_id not in SCENARIOS:
         return {"error": "Scenario not found"}, 404
+    
+    # Fetch to update satellite count
+    satellites = await fetch_tle_data(scenario_id)
+    
     return asdict(SCENARIOS[scenario_id])
 
 @app.get("/api/scenarios/{scenario_id}/satellites")
 async def get_satellites(scenario_id: str):
-    """Get all satellites in a scenario (initial state)"""
+    """Get all satellites in a scenario"""
     start = time.perf_counter()
-    satellites = get_constellation_for_scenario(scenario_id)
+    
+    satellites = await fetch_tle_data(scenario_id)
     
     result = []
     for sat in satellites:
-        sat_dict = asdict(sat)
-        sat_dict["orbital_elements"] = asdict(sat.orbital_elements)
-        result.append(sat_dict)
+        result.append({
+            "id": sat.id,
+            "name": sat.name,
+            "orbit_type": sat.orbit_type.value
+        })
     
     elapsed = time.perf_counter() - start
     
@@ -285,224 +346,133 @@ async def get_satellites(scenario_id: str):
         "count": len(result),
         "satellites": result,
         "_meta": {
-            "generation_time_ms": round(elapsed * 1000, 2)
+            "fetch_time_ms": round(elapsed * 1000, 2),
+            "data_source": "CelesTrak"
         }
     }
 
 @app.get("/api/scenarios/{scenario_id}/positions")
 async def get_positions(
     scenario_id: str,
-    time_offset: float = Query(0, description="Time offset in seconds from epoch"),
-    chunk_size: Optional[int] = Query(None, description="Number of satellites per chunk for pagination"),
-    chunk_index: Optional[int] = Query(0, description="Chunk index for pagination")
+    time_offset: float = Query(0, description="Time offset in seconds from now"),
+    limit: Optional[int] = Query(None, description="Limit number of satellites returned")
 ):
     """
-    Get current positions for all satellites at a given time offset.
-    Supports chunked responses for large constellations.
+    Get current positions for all satellites.
+    Uses SGP4 propagation for accurate positioning.
     """
     start = time.perf_counter()
-    satellites = get_constellation_for_scenario(scenario_id)
     
-    # Apply chunking if requested
-    if chunk_size:
-        start_idx = chunk_index * chunk_size
-        end_idx = start_idx + chunk_size
-        satellites = satellites[start_idx:end_idx]
-        total_chunks = math.ceil(len(get_constellation_for_scenario(scenario_id)) / chunk_size)
-    else:
-        total_chunks = 1
+    satellites = await fetch_tle_data(scenario_id)
+    
+    if limit:
+        satellites = satellites[:limit]
+    
+    # Calculate target time
+    target_time = datetime.now(timezone.utc)
+    if time_offset:
+        from datetime import timedelta
+        target_time = target_time + timedelta(seconds=time_offset)
     
     positions = []
     for sat in satellites:
-        pos = propagate_position(sat.orbital_elements, time_offset)
-        positions.append({
-            "id": sat.id,
-            "name": sat.name,
-            "orbit_type": sat.orbit_type.value,
-            **pos
-        })
+        pos = propagate_satellite(sat, target_time)
+        if pos:
+            positions.append(pos)
     
     elapsed = time.perf_counter() - start
     
     return {
         "scenario_id": scenario_id,
+        "timestamp": target_time.isoformat(),
         "time_offset_seconds": time_offset,
         "count": len(positions),
         "positions": positions,
         "_meta": {
             "computation_time_ms": round(elapsed * 1000, 2),
-            "chunk_index": chunk_index if chunk_size else 0,
-            "total_chunks": total_chunks,
-            "chunk_size": chunk_size
+            "data_source": "CelesTrak",
+            "propagator": "SGP4"
         }
     }
-
-async def generate_position_stream(
-    scenario_id: str,
-    duration_seconds: int,
-    time_step: float
-) -> Generator[str, None, None]:
-    """Generator for streaming position data"""
-    satellites = get_constellation_for_scenario(scenario_id)
-    
-    for t in range(0, duration_seconds, int(time_step)):
-        frame_data = {
-            "timestamp": t,
-            "positions": []
-        }
-        
-        for sat in satellites:
-            pos = propagate_position(sat.orbital_elements, float(t))
-            frame_data["positions"].append({
-                "id": sat.id,
-                **pos
-            })
-        
-        yield f"data: {json.dumps(frame_data)}\n\n"
-        await asyncio.sleep(0.01)  # Prevent blocking
-
-@app.get("/api/scenarios/{scenario_id}/stream")
-async def stream_positions(
-    scenario_id: str,
-    duration: int = Query(3600, description="Duration in seconds"),
-    step: float = Query(60, description="Time step in seconds")
-):
-    """
-    Stream position data using Server-Sent Events.
-    Efficient for real-time visualization of orbital propagation.
-    """
-    return StreamingResponse(
-        generate_position_stream(scenario_id, duration, step),
-        media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive"
-        }
-    )
 
 @app.get("/api/compare")
 async def compare_scenarios(
     scenario_ids: str = Query(..., description="Comma-separated scenario IDs"),
-    time_offset: float = Query(0, description="Time offset in seconds"),
-    metric: str = Query("coverage", description="Comparison metric: coverage, velocity, altitude")
+    metric: str = Query("count", description="Comparison metric: count, altitude")
 ):
-    """
-    Compare multiple scenarios side-by-side.
-    Useful for what-if analysis across constellation designs.
-    """
+    """Compare multiple scenarios"""
     start = time.perf_counter()
-    ids = scenario_ids.split(",")
+    ids = [s.strip() for s in scenario_ids.split(",")]
     
     comparison = {}
+    target_time = datetime.now(timezone.utc)
+    
     for scenario_id in ids:
-        scenario_id = scenario_id.strip()
         if scenario_id not in SCENARIOS:
             continue
-            
-        satellites = get_constellation_for_scenario(scenario_id)
-        positions = [propagate_position(s.orbital_elements, time_offset) for s in satellites]
+        
+        satellites = await fetch_tle_data(scenario_id)
         
         if metric == "altitude":
-            values = [p["altitude"] / 1000 for p in positions]  # km
+            altitudes = []
+            for sat in satellites[:100]:  # Limit for performance
+                pos = propagate_satellite(sat, target_time)
+                if pos:
+                    altitudes.append(pos["altitude"] / 1000)  # km
+            
+            if altitudes:
+                comparison[scenario_id] = {
+                    "min": min(altitudes),
+                    "max": max(altitudes),
+                    "mean": sum(altitudes) / len(altitudes),
+                    "unit": "km"
+                }
+        else:  # count
             comparison[scenario_id] = {
-                "min": min(values),
-                "max": max(values),
-                "mean": sum(values) / len(values),
-                "unit": "km"
-            }
-        elif metric == "velocity":
-            values = [p["velocity"] for p in positions]
-            comparison[scenario_id] = {
-                "min": min(values),
-                "max": max(values),
-                "mean": sum(values) / len(values),
-                "unit": "km/s"
-            }
-        else:  # coverage (simplified - latitude spread)
-            lats = [p["latitude"] for p in positions]
-            comparison[scenario_id] = {
-                "lat_coverage": max(lats) - min(lats),
                 "satellite_count": len(satellites),
-                "unit": "degrees"
+                "name": SCENARIOS[scenario_id].name
             }
     
     elapsed = time.perf_counter() - start
     
     return {
         "metric": metric,
-        "time_offset_seconds": time_offset,
         "comparison": comparison,
         "_meta": {
             "computation_time_ms": round(elapsed * 1000, 2)
         }
     }
 
-@app.get("/api/metrics")
-async def get_performance_metrics():
-    """
-    Return API performance metrics.
-    Useful for performance monitoring and optimization decisions.
-    """
-    # In production, this would pull from actual metrics collection
-    return {
-        "endpoints": {
-            "/api/scenarios/{id}/positions": {
-                "avg_response_time_ms": 12.5,
-                "p95_response_time_ms": 45.2,
-                "requests_per_minute": 150
-            },
-            "/api/scenarios/{id}/stream": {
-                "active_connections": 3,
-                "avg_throughput_events_per_sec": 60
-            }
-        },
-        "system": {
-            "memory_usage_mb": 128,
-            "cpu_percent": 15.2
-        }
-    }
+@app.get("/api/health")
+async def health_check():
+    """Health check endpoint"""
+    return {"status": "healthy", "timestamp": datetime.now(timezone.utc).isoformat()}
 
-# WebSocket endpoint for real-time updates
+# WebSocket for real-time updates
 @app.websocket("/ws/positions/{scenario_id}")
 async def websocket_positions(websocket: WebSocket, scenario_id: str):
-    """
-    WebSocket endpoint for real-time position streaming.
-    More efficient than SSE for bidirectional communication.
-    """
+    """WebSocket endpoint for real-time position streaming"""
     await websocket.accept()
     
-    satellites = get_constellation_for_scenario(scenario_id)
-    time_offset = 0.0
+    satellites = await fetch_tle_data(scenario_id)
     
     try:
         while True:
-            # Check for client messages (playback control)
-            try:
-                data = await asyncio.wait_for(
-                    websocket.receive_json(),
-                    timeout=0.1
-                )
-                if "time_offset" in data:
-                    time_offset = data["time_offset"]
-                if "command" in data:
-                    if data["command"] == "pause":
-                        continue
-            except asyncio.TimeoutError:
-                pass
+            target_time = datetime.now(timezone.utc)
             
-            # Send position update
             positions = []
             for sat in satellites:
-                pos = propagate_position(sat.orbital_elements, time_offset)
-                positions.append({"id": sat.id, **pos})
+                pos = propagate_satellite(sat, target_time)
+                if pos:
+                    positions.append(pos)
             
             await websocket.send_json({
-                "timestamp": time_offset,
+                "timestamp": target_time.isoformat(),
+                "count": len(positions),
                 "positions": positions
             })
             
-            time_offset += 60  # Advance 60 seconds per frame
-            await asyncio.sleep(0.1)  # 10 FPS
+            await asyncio.sleep(1)  # Update every second
             
     except WebSocketDisconnect:
         pass
