@@ -4,7 +4,7 @@ import 'cesium/Build/Cesium/Widgets/widgets.css';
 import type { SatellitePosition, VisualizationSettings } from '../types';
 
 // Set Cesium Ion token (use default for demo, replace with your own in production)
-Cesium.Ion.defaultAccessToken = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJqdGkiOiI0MjA4ZjUwMS1jNGI4LTQxMjYtODljNi1iMGU3YmIyOGZiN2MiLCJpZCI6MjU5LCJpYXQiOjE3MDAwMDAwMDB9.DEMO_TOKEN';
+Cesium.Ion.defaultAccessToken = 'VITE_CESIUM_TOKEN';
 
 interface CesiumViewerProps {
   positions: SatellitePosition[];
