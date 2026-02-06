@@ -151,8 +151,6 @@ jobs:
           source venv/bin/activate
           echo "Installing requirements..."
           pip install -r requirements.txt
-          echo "Restarting service..."
-          sudo systemctl restart sedaro-api || echo "Service not configured yet"
           EOF
 
       - name: Configure Nginx
@@ -211,7 +209,7 @@ jobs:
             ${{ secrets.LIGHTSAIL_USER }}@${{ secrets.LIGHTSAIL_HOST }} << 'EOF'
           
           # Create systemd service
-          sudo tee /etc/systemd/system/sedaro-api.service > /dev/null << 'SERVICE'
+          sudo tee /etc/systemd/system/sat-constellation-api.service > /dev/null << 'SERVICE'
           [Unit]
           Description=Satellite Constellation Simulator API
           After=network.target
@@ -229,10 +227,10 @@ jobs:
           WantedBy=multi-user.target
           SERVICE
 
-          # Enable and start service
+          # Enable and start new service
           sudo systemctl daemon-reload
-          sudo systemctl enable sedaro-api
-          sudo systemctl restart sedaro-api
+          sudo systemctl enable sat-constellation-api
+          sudo systemctl restart sat-constellation-api
           echo "Systemd service configured"
           EOF
 
