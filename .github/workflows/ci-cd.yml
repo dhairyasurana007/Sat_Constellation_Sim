@@ -12,10 +12,10 @@ env:
 
 jobs:
   # ===========================================================================
-  # Frontend Tests & Build
+  # Test
   # ===========================================================================
-  frontend:
-    name: Frontend Build
+  test:
+    name: Test
     runs-on: ubuntu-latest
     
     steps:
@@ -29,37 +29,13 @@ jobs:
           cache: 'npm'
           cache-dependency-path: frontend/package-lock.json
 
-      - name: Install dependencies
+      - name: Test frontend build
         working-directory: ./frontend
-        run: npm ci
-
-      - name: Type check
-        working-directory: ./frontend
-        run: npm run lint || true  # Don't fail on lint warnings for now
-
-      - name: Build
-        working-directory: ./frontend
+        run: |
+          npm ci
+          npm run build
         env:
           VITE_CESIUM_TOKEN: ${{ secrets.VITE_CESIUM_TOKEN }}
-        run: npm run build
-
-      - name: Upload build artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: frontend-dist
-          path: frontend/dist
-          retention-days: 1
-
-  # ===========================================================================
-  # Backend Tests
-  # ===========================================================================
-  backend:
-    name: Backend Tests
-    runs-on: ubuntu-latest
-    
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -68,38 +44,58 @@ jobs:
           cache: 'pip'
           cache-dependency-path: backend/requirements.txt
 
-      - name: Install dependencies
+      - name: Test backend
         working-directory: ./backend
         run: |
-          python -m pip install --upgrade pip
           pip install -r requirements.txt
-          pip install pytest httpx  # Testing dependencies
-
-      - name: Run tests
-        working-directory: ./backend
-        run: |
-          # Run basic import/syntax check if no tests exist yet
-          python -c "from main import app; print('✓ Backend imports successfully')"
-          # pytest tests/ -v  # Uncomment when you have tests
+          python -c "from main import app; print('✓ Backend OK')"
 
   # ===========================================================================
-  # Deploy to Lightsail (only on push to main)
+  # Build Docker Image
   # ===========================================================================
-  deploy:
-    name: Deploy to Lightsail
+  build:
+    name: Build Image
     runs-on: ubuntu-latest
-    needs: [frontend, backend]
+    needs: [test]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Download frontend build
+      - name: Build image
+        run: |
+          docker build \
+            --build-arg VITE_CESIUM_TOKEN=${{ secrets.VITE_CESIUM_TOKEN }} \
+            -t sat-sim:latest \
+            -t sat-sim:${{ github.sha }} \
+            -f backend/Dockerfile \
+            .
+          docker save sat-sim:latest | gzip > app-image.tar.gz
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: docker-image
+          path: app-image.tar.gz
+          retention-days: 1
+
+  # ===========================================================================
+  # Deploy to Kubernetes (k3s on Lightsail)
+  # ===========================================================================
+  deploy:
+    name: Deploy to K8s
+    runs-on: ubuntu-latest
+    needs: [build]
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download artifact
         uses: actions/download-artifact@v4
         with:
-          name: frontend-dist
-          path: frontend/dist
+          name: docker-image
 
       - name: Setup SSH
         run: |
@@ -108,137 +104,62 @@ jobs:
           chmod 600 ~/.ssh/lightsail_key
           ssh-keyscan -H ${{ secrets.LIGHTSAIL_HOST }} >> ~/.ssh/known_hosts
 
-      - name: Ensure directories exist
+      - name: Copy files to server
         run: |
-          ssh -i ~/.ssh/lightsail_key \
-            ${{ secrets.LIGHTSAIL_USER }}@${{ secrets.LIGHTSAIL_HOST }} \
-            "sudo mkdir -p /var/www/sat_constellation_sim/frontend/dist && \
-             sudo mkdir -p /var/www/sat_constellation_sim/backend && \
-             sudo chown -R ubuntu:ubuntu /var/www/sat_constellation_sim"
+          scp -i ~/.ssh/lightsail_key \
+            app-image.tar.gz \
+            ${{ secrets.LIGHTSAIL_USER }}@${{ secrets.LIGHTSAIL_HOST }}:/tmp/
+          scp -i ~/.ssh/lightsail_key -r \
+            k8s \
+            ${{ secrets.LIGHTSAIL_USER }}@${{ secrets.LIGHTSAIL_HOST }}:/tmp/
 
-      - name: Install system dependencies
-        run: |
-          ssh -i ~/.ssh/lightsail_key \
-            ${{ secrets.LIGHTSAIL_USER }}@${{ secrets.LIGHTSAIL_HOST }} \
-            "sudo apt-get update && \
-             sudo apt-get install -y python3-venv python3-pip nginx"
-
-      - name: Deploy to server
-        run: |
-          # Sync frontend build
-          rsync -avz --delete \
-            -e "ssh -i ~/.ssh/lightsail_key" \
-            frontend/dist/ \
-            ${{ secrets.LIGHTSAIL_USER }}@${{ secrets.LIGHTSAIL_HOST }}:/var/www/sat_constellation_sim/frontend/dist/
-
-          # Sync backend code
-          rsync -avz --delete \
-            --exclude '__pycache__' \
-            --exclude 'venv' \
-            --exclude '.pytest_cache' \
-            -e "ssh -i ~/.ssh/lightsail_key" \
-            backend/ \
-            ${{ secrets.LIGHTSAIL_USER }}@${{ secrets.LIGHTSAIL_HOST }}:/var/www/sat_constellation_sim/backend/
-
-      - name: Setup Python environment
-        run: |
-          ssh -i ~/.ssh/lightsail_key \
-            ${{ secrets.LIGHTSAIL_USER }}@${{ secrets.LIGHTSAIL_HOST }} << 'EOF'
-          cd /var/www/sat_constellation_sim/backend
-          echo "Installing requirements globally..."
-          pip install -r requirements.txt --break-system-packages
-          EOF
-
-      - name: Configure Nginx
+      - name: Deploy to Kubernetes
         run: |
           ssh -i ~/.ssh/lightsail_key \
             ${{ secrets.LIGHTSAIL_USER }}@${{ secrets.LIGHTSAIL_HOST }} << 'EOF'
           
-          # Create Nginx config
-          sudo tee /etc/nginx/sites-available/sat_constellation_sim > /dev/null << 'NGINX'
-          server {
-              listen 80;
-              server_name _;
-
-              gzip on;
-              gzip_types text/plain text/css application/json application/javascript text/xml application/xml;
-
-              location / {
-                  root /var/www/sat_constellation_sim/frontend/dist;
-                  index index.html;
-                  try_files $uri $uri/ /index.html;
-              }
-
-              location /api/ {
-                  proxy_pass http://127.0.0.1:8000;
-                  proxy_http_version 1.1;
-                  proxy_set_header Host $host;
-                  proxy_set_header X-Real-IP $remote_addr;
-                  proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-                  proxy_set_header X-Forwarded-Proto $scheme;
-              }
-
-              location /ws/ {
-                  proxy_pass http://127.0.0.1:8000;
-                  proxy_http_version 1.1;
-                  proxy_set_header Upgrade $http_upgrade;
-                  proxy_set_header Connection "upgrade";
-                  proxy_set_header Host $host;
-                  proxy_read_timeout 86400;
-              }
-          }
-          NGINX
-
-          # Enable site and remove default
-          sudo ln -sf /etc/nginx/sites-available/sat_constellation_sim /etc/nginx/sites-enabled/
-          sudo rm -f /etc/nginx/sites-enabled/default
+          # Install k3s if not present
+          if ! command -v k3s &> /dev/null; then
+            echo "Installing k3s..."
+            curl -sfL https://get.k3s.io | sh -
+            sudo chmod 644 /etc/rancher/k3s/k3s.yaml
+            echo 'export KUBECONFIG=/etc/rancher/k3s/k3s.yaml' >> ~/.bashrc
+          fi
           
-          # Test and restart
-          sudo nginx -t
-          sudo systemctl restart nginx
-          echo "✓ Nginx configured"
-          EOF
-
-      - name: Setup systemd service
-        run: |
-          ssh -i ~/.ssh/lightsail_key \
-            ${{ secrets.LIGHTSAIL_USER }}@${{ secrets.LIGHTSAIL_HOST }} << 'EOF'
+          export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
           
-          # Create systemd service
-          sudo tee /etc/systemd/system/sat-constellation-api.service > /dev/null << 'SERVICE'
-          [Unit]
-          Description=Satellite Constellation Simulator API
-          After=network.target
-
-          [Service]
-          User=ubuntu
-          Group=ubuntu
-          WorkingDirectory=/var/www/sat_constellation_sim/backend
-          ExecStart=/usr/bin/python3 -m uvicorn main:app --host 127.0.0.1 --port 8000
-          Restart=always
-          RestartSec=5
-
-          [Install]
-          WantedBy=multi-user.target
-          SERVICE
-
-          # Enable and start new service
-          sudo systemctl daemon-reload
-          sudo systemctl enable sat-constellation-api
-          sudo systemctl restart sat-constellation-api
-          echo "Systemd service configured"
+          # Load Docker image into k3s
+          echo "Loading image..."
+          gunzip -c /tmp/app-image.tar.gz | sudo k3s ctr images import -
+          
+          # Update image name in deployment
+          sed -i 's|sat-sim-backend:latest|sat-sim:latest|g' /tmp/k8s/backend.yaml
+          
+          # Apply Kubernetes manifests
+          echo "Deploying to Kubernetes..."
+          sudo kubectl apply -k /tmp/k8s/
+          
+          # Force rollout to pick up new image
+          sudo kubectl rollout restart deployment/backend
+          sudo kubectl rollout status deployment/backend --timeout=90s
+          
+          # Cleanup
+          rm /tmp/app-image.tar.gz
+          rm -rf /tmp/k8s
+          
+          echo "✓ Kubernetes deployment complete"
+          sudo kubectl get pods
           EOF
 
       - name: Verify deployment
         run: |
-          sleep 5  # Wait for service to start
+          sleep 15
           curl -f http://${{ secrets.LIGHTSAIL_HOST }}/api/scenarios || exit 1
-          echo "Deployment verified successfully"
+          echo "✓ Deployment verified"
 
-      - name: Deployment summary
+      - name: Summary
         run: |
           echo "## Deployment Complete! :rocket:" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
           echo "**URL:** http://${{ secrets.LIGHTSAIL_HOST }}" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
           echo "**Commit:** ${{ github.sha }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Infrastructure:** k3s (Kubernetes) + Docker" >> $GITHUB_STEP_SUMMARY
