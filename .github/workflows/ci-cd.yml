@@ -98,19 +98,13 @@ jobs:
           name: docker-image
 
       - name: Setup SSH
+        env:
+          SSH_KEY: ${{ secrets.LIGHTSAIL_SSH_KEY }}
         run: |
-          if [ -z "${{ secrets.LIGHTSAIL_HOST }}" ]; then
-            echo "Error: LIGHTSAIL_HOST secret is not set"
-            exit 1
-          fi
-          if [ -z "${{ secrets.LIGHTSAIL_SSH_KEY }}" ]; then
-            echo "Error: LIGHTSAIL_SSH_KEY secret is not set"
-            exit 1
-          fi
           mkdir -p ~/.ssh
-          echo "${{ secrets.LIGHTSAIL_SSH_KEY }}" > ~/.ssh/lightsail_key
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/lightsail_key
           chmod 600 ~/.ssh/lightsail_key
-          ssh-keyscan -H ${{ secrets.LIGHTSAIL_HOST }} >> ~/.ssh/known_hosts 2>/dev/null
+          ssh-keyscan -H ${{ secrets.LIGHTSAIL_HOST }} >> ~/.ssh/known_hosts 2>/dev/null || true
 
       - name: Copy files to server
         run: |
