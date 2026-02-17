@@ -123,16 +123,21 @@ jobs:
           if ! command -v k3s &> /dev/null; then
             echo "Installing k3s..."
             curl -sfL https://get.k3s.io | sh -
-            
-            # Wait for k3s to be ready
-            echo "Waiting for k3s to start..."
-            sleep 30
-            sudo kubectl wait --for=condition=Ready nodes --all --timeout=120s
-            
-            sudo chmod 644 /etc/rancher/k3s/k3s.yaml
-          else
-            echo "k3s already installed"
           fi
+          
+          # Wait for k3s to be ready
+          echo "Waiting for k3s to start..."
+          for i in {1..30}; do
+            if sudo k3s kubectl get nodes &>/dev/null; then
+              echo "k3s is ready!"
+              break
+            fi
+            echo "Waiting... ($i/30)"
+            sleep 5
+          done
+          
+          sudo chmod 644 /etc/rancher/k3s/k3s.yaml
+          sudo k3s kubectl get nodes
           EOF
 
       - name: Deploy to Kubernetes
@@ -140,26 +145,24 @@ jobs:
           ssh -i ~/.ssh/lightsail_key -o ServerAliveInterval=30 -o ServerAliveCountMax=10 \
             ${{ secrets.LIGHTSAIL_USER }}@${{ secrets.LIGHTSAIL_HOST }} << 'EOF'
           
-          export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
-          
           # Load Docker image into k3s
           echo "Loading image..."
           gunzip -c /tmp/app-image.tar.gz | sudo k3s ctr images import -
           
           # Apply Kubernetes manifests
           echo "Deploying to Kubernetes..."
-          sudo kubectl apply -k /tmp/k8s/
+          sudo k3s kubectl apply -k /tmp/k8s/
           
           # Force rollout to pick up new image
-          sudo kubectl rollout restart deployment/backend
-          sudo kubectl rollout status deployment/backend --timeout=90s
+          sudo k3s kubectl rollout restart deployment/backend
+          sudo k3s kubectl rollout status deployment/backend --timeout=90s
           
           # Cleanup
           rm /tmp/app-image.tar.gz
           rm -rf /tmp/k8s
           
           echo "✓ Kubernetes deployment complete"
-          sudo kubectl get pods
+          sudo k3s kubectl get pods
           EOF
 
       - name: Verify deployment
